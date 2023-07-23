@@ -2,11 +2,37 @@
 
 #define HWSERIAL Serial1
 #include "utils.h"
+#include "Keyboard.h"
+#include "Mouse.h"
 
 #define MYDEBUG
 #define KBD_BUFFSZ 200
 #define KEYNAME_BUFFSZ 25
 #define PREFIX 17 // CTRL-Q
+
+// Code from https://www.sjoerdlangkemper.nl/2022/11/16/running-etherkey-on-arduino-leonardo/
+#ifdef ARDUINO_AVR_LEONARDO
+
+#define KEY_UP KEY_UP_ARROW
+#define KEY_DOWN KEY_DOWN_ARROW
+#define KEY_RIGHT KEY_RIGHT_ARROW
+#define KEY_LEFT KEY_LEFT_ARROW
+
+#define KEYPAD_PLUS KEY_KP_PLUS
+#define KEYPAD_0 KEY_KP_0
+
+#define KEY_ENTER KEY_RETURN
+#define KEY_SPACE ' '
+
+// Create bitmaps of all the modifier keys
+#define MODIFIERKEY_CTRL 0x01
+#define MODIFIERKEY_ALT 0x02
+#define MODIFIERKEY_SHIFT 0x04
+#define MODIFIERKEY_GUI 0x08
+
+#define keyboard_leds 0
+#endif
+
 
 // Util functions
 int mode_select(char in_ascii, int oldmode);

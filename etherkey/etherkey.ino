@@ -16,6 +16,7 @@ void setup() {
   delay(1000);
   SerialClear();
   SerialPrintfln("Switching to %s mode", mode_strings[mode]);
+  Mouse.begin();
 }
 
 void loop() {

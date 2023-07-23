@@ -186,11 +186,21 @@ void usb_send_key(uint16_t key, uint16_t mod=0) {
   itoa(mod, mod_b, 2);
   SerialPrintfln("\tSendKey: %6i = %08s | mod: %6i = %08s", key, key_b, mod, mod_b);
 #endif
+  // TBD - extend this to differentiate between left and right
+  // versions.
+  if (mod & MODIFIERKEY_CTRL)
+    Keyboard.press(KEY_LEFT_CTRL );
+  if (mod & MODIFIERKEY_ALT)
+    Keyboard.press(KEY_LEFT_ALT);
+  if (mod & MODIFIERKEY_SHIFT)
+    Keyboard.press(KEY_LEFT_SHIFT);
+  if (mod & MODIFIERKEY_GUI)
+    Keyboard.press(KEY_LEFT_GUI);
+
   if (mod) Keyboard.press(mod);
   Keyboard.press(key);
   Keyboard.releaseAll();
 }
-
 
 // Interactive mode functions
 void interactive_mode(char in_ascii) {
@@ -283,6 +293,7 @@ void c_parse(char* str) {
     case str2int("SendRaw"):
     case str2int("sendraw"):
       // Send the rest of the line literally
+      SerialPrintfln("sendraw");
       if ((pch = strtok (NULL,"")))
         c_sendraw(pch);
       break;
@@ -292,15 +303,68 @@ void c_parse(char* str) {
       // Send the rest of the line (and parse special characters)
       if ((pch = strtok (NULL,"")))
         c_send(pch);
+      SerialPrintfln("send");
+
+      break;
+
+    case str2int("mouse-wheel"):
+      {
+        int dwheel=0;
+        if ((pch = strtok (NULL," ")))
+          dwheel = atoi(pch);
+  
+        SerialPrintfln("Mouse wheel dwheel=%d", dwheel);
+  
+        Mouse.move(0,0,dwheel);
+      }
+      break;
+
+     case str2int("mouse-button-press"):
+      {
+        int button=0;
+        if ((pch = strtok (NULL," ")))
+          button = atoi(pch);
+  
+        SerialPrintfln("Mouse.press button=%d", button);
+
+        Mouse.press(MOUSE_LEFT + button);
+      }
+      break;
+
+    // TBD extend this to actually do something
+    case str2int("mouse-button-release"):
+      {
+        int button=0;
+        if ((pch = strtok (NULL," ")))
+          button = atoi(pch);
+  
+        SerialPrintfln("Mouse.release button=%d", button);
+        Mouse.release(MOUSE_LEFT + button);
+      }
+      break;
+
+    case str2int("mouse-move"):
+      int dx=0, dy=0;
+      if ((pch = strtok (NULL," ")))
+        dx = atoi(pch);
+
+      if ((pch = strtok (NULL, " ")))
+        dy = atoi(pch);
+
+      SerialPrintfln("Mouse move");
+      Mouse.move(dx,dy,0); 
       break;
 
     case str2int("Help"):
     case str2int("help"):
+      SerialPrintfln("help");
       // Display a informative help message
       //TODO
       break;
 
     default:
+      SerialPrintfln("Looking for keyname=%s", pch);
+
       // Check if input is a keyname and send it
       if (!c_parse_ext(pch, false, 0)) {
         // Show warning about invalid command
@@ -333,6 +397,10 @@ bool c_parse_ext(char* str, bool send_single, int modifier) {
     }
     return true;
   } else {
+#ifdef MYDEBUG
+  SerialPrintfln("Doing special command (i.e. sendkey didn't work...)!");
+#endif
+    
     switch (str2int(str)) {
       case str2int("Sleep"):
       case str2int("sleep"):
