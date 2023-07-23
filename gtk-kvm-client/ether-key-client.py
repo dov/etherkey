@@ -12,6 +12,8 @@ import gi
 import serial,time
 import pdb
 import cairo
+import time
+import argparse
 
 gi.require_version('PangoCairo', '1.0')
 gi.require_version('Gtk', '3.0')
@@ -52,6 +54,37 @@ class EthClient:
   def mouse_wheel(self, cmd):
     '''Send a mouse wheel encoded as an etherkey command'''
     self.sr.write(('mouse-wheel ' + cmd).encode() + _ctrl('m'))
+
+  def char_encode(self, line):
+    ret = ''
+    for ch in line:
+      if ch == ' ':
+        ret += '{space}'
+      elif ch == '\n':
+        ret += '{Enter}'
+      elif ch in '!@#$%^&*(){}[]/?=+\'",<.>\\':
+        ret += '{'+ch+'}'
+      else:
+        ret += ch
+    return ret
+        
+  def upload_file(self, filename):
+    '''Upload a file by "typing it" on to the remote computer'''
+    max_len = 16 # Max chunk size
+    with open(filename) as fh:
+      for line in fh:
+        # Split the line into chunks of maximum max_len chars
+        chunks = []
+        while len(line):
+          chunks += [line[0:max_len]]
+          line = line[max_len:]
+
+        # Encode and send the chunks one at a time
+        for chunk in chunks:
+          chunk = self.char_encode(chunk)
+          self.sr.write(('send ' + chunk).encode() + _ctrl('m'))
+          # Heuristic sleeping between chunks in order not to loose characters. Seems ok
+          time.sleep(0.01*len(chunk))
 
 ec  = EthClient()
 print('Connected!')
@@ -202,16 +235,21 @@ class MyWidget(Gtk.Misc):
     screen_x = origin.x
     screen_y = origin.y
     screen = self.get_screen()
+    display = Gdk.Display.get_default()
+    monitor = display.get_monitor(0)
+    geometry = monitor.get_geometry()
+    screen_width = geometry.width
+    screen_height = geometry.height
     
     if self.is_grabbed and (
       self.mouse_x+screen_x <= 0
       or self.mouse_y+screen_y <=0
-      or self.mouse_x+screen_x >= screen.get_width()-1
-      or self.mouse_y+screen_y >= screen.get_height()-1
+      or self.mouse_x+screen_x >= screen_width-1
+      or self.mouse_y+screen_y >= screen_height-1
       ):
       self.mouse_x = 1000 + screen_x
       self.mouse_y = 1000 + screen_y
-      Gdk.Device.warp(Gdk.Display.get_default().get_default_seat().get_pointer(), self.get_window().get_screen(), self.mouse_x, self.mouse_y)
+      Gdk.Device.warp(display.get_default_seat().get_pointer(), self.get_window().get_screen(), self.mouse_x, self.mouse_y)
 
 
   def on_scroll(self, window, event):
@@ -240,6 +278,27 @@ class MyWidget(Gtk.Misc):
       return
     if debug:
       print(f'{event.hardware_keycode=}')
+
+    # Allow uploading a file
+    # Look for control f
+    if not self.is_grabbed:
+      # Control f including on swapped keyboards
+      if (any(k in self.modifiers for k in (37,66))
+          and chr(event.keyval) == 'f'):
+        dialog = Gtk.FileChooserDialog(title='Select a file',
+                                       parent=self.get_toplevel(),
+                                       action = Gtk.FileChooserAction.OPEN)
+        dialog.add_buttons(
+          Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
+          Gtk.STOCK_OK, Gtk.ResponseType.OK)
+
+        response = dialog.run()
+        if response == Gtk.ResponseType.OK:
+          fn = dialog.get_filename()
+          ec.upload_file(fn)
+        dialog.destroy()
+        print('Got control-f!')
+        return
 
     if event.hardware_keycode in self.special_keys:
       if debug:
@@ -296,8 +355,24 @@ class MyWindow(Gtk.Window):
     print('on_map_event')
     self.wdg.toggle_grab()
 
+parser = argparse.ArgumentParser(description='Process a file')
+parser.add_argument('-u', '--upload',
+                    dest='upload',
+                    action='store',
+                    type=str,
+                    default=None,
+                    help='Output filename')
+args = parser.parse_args()
 
+
+if args.upload is not None:
+  ec = EthClient()
+  ec.upload_file(args.upload)
+  exit()
+
+# Interactive by default
 win = MyWindow()
 win.connect('destroy', Gtk.main_quit)
 win.show_all()
 Gtk.main()
+

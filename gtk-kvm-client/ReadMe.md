@@ -10,3 +10,11 @@
  - Use mouse and keyboard as if working on the remote computer.
  - To release the grab press the "right control" button
  
+# Command line usage
+
+- ether-key-client can be used to upload a file to the remote computer by the `-u` switch.
+- The option is also available by doing the following:
+  - Exit grab mode
+  - Press Ctrl+f
+  - Choose file and press ok
+  
