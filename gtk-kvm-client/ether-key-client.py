@@ -120,6 +120,7 @@ class MyWidget(Gtk.Misc):
     self.mouse_y = None
     self.mouse_scale_x = 0.5
     self.mouse_scale_y = 0.5
+    self.right_control = False  # Used for special
 
     # Needed for keypress events
     self.set_can_focus(True)
@@ -268,8 +269,31 @@ class MyWidget(Gtk.Misc):
   def do_key_press_event(self, event):
     # Catch right control
     if event.hardware_keycode == 105:
-      self.toggle_grab()
+      self.right_control_handled = False
+      self.right_control = True
       return
+
+    if self.right_control:
+      if event.hardware_keycode in (118, # insert
+                                    111, # Up
+                                    113, # Left
+                                    114, # right
+                                    116, # down
+                                    ):  
+        if event.hardware_keycode == 118:
+          print('Control Alt Delete')
+          ec.send('^!{Delete}')
+        elif event.hardware_keycode == 113:
+          ec.mouse_move('-100 0')
+        elif event.hardware_keycode == 114:
+          ec.mouse_move(f'100 0')
+        elif event.hardware_keycode == 111:
+          ec.mouse_move(f'0 -100')
+        elif event.hardware_keycode == 116:
+          ec.mouse_move(f'0 100')
+          
+        self.right_control_handled = True
+        return
 
     if event.hardware_keycode in self.modifier_keys:
       if debug:
@@ -318,7 +342,11 @@ class MyWidget(Gtk.Misc):
   def do_key_release_event(self, event):
     # Catch right control
     if event.hardware_keycode == 105:
+      self.right_control = False
+      if not self.right_control_handled:
+        self.toggle_grab()
       return
+
     if event.hardware_keycode in self.modifier_keys:
       if debug:
         print('Release ' + self.modifier_keys[event.hardware_keycode][1])
