@@ -14,10 +14,14 @@ import pdb
 import cairo
 import time
 import argparse
+import socket
+import urllib3
+import re
+import json
 
 gi.require_version('PangoCairo', '1.0')
 gi.require_version('Gtk', '3.0')
-from gi.repository import Gtk, Gdk, PangoCairo, Pango
+from gi.repository import GLib, Gtk, Gdk, PangoCairo, Pango
 
 debug = False
 
@@ -28,9 +32,9 @@ def _ctrl(ch):
 class EthClient:
   '''A client to a serial connected ether client'''
   def __init__(self,
-               port = '/dev/ttyUSB0',
+               device = '/dev/ttyUSB0',
                baudrate = 57600):
-    self.sr = serial.Serial(port, baudrate=baudrate,interCharTimeout=1)
+    self.sr = serial.Serial(device, baudrate=baudrate,interCharTimeout=1)
     
     # Switch to command mode
     self.sr.write(_ctrl('q')+b'1') # Initial reset
@@ -68,39 +72,39 @@ class EthClient:
         ret += ch
     return ret
         
-  def upload_file(self, filename):
+  def send_code(self, code):
+    '''Send a raw command'''
+    self.sr.write(('send ' + code).encode() + _ctrl('m'))
+    
+  def send_string(self, string):
     '''Upload a file by "typing it" on to the remote computer'''
     max_len = 16 # Max chunk size
+
+    # Split the string into chunks of maximum max_len chars
+    chunks = []
+    while len(string):
+      chunks += [string[0:max_len]]
+      string = string[max_len:]
+
+    # Encode and send the chunks one at a time
+    for chunk in chunks:
+      chunk = self.char_encode(chunk)
+      self.sr.write(('send ' + chunk).encode() + _ctrl('m'))
+      # Heuristic sleeping between chunks in order not to loose characters. Seems ok
+      time.sleep(0.01*len(chunk))
+
+  def upload_file(self, filename):
     with open(filename) as fh:
-      for line in fh:
-        # Split the line into chunks of maximum max_len chars
-        chunks = []
-        while len(line):
-          chunks += [line[0:max_len]]
-          line = line[max_len:]
-
-        # Encode and send the chunks one at a time
-        for chunk in chunks:
-          chunk = self.char_encode(chunk)
-          self.sr.write(('send ' + chunk).encode() + _ctrl('m'))
-          # Heuristic sleeping between chunks in order not to loose characters. Seems ok
-          time.sleep(0.01*len(chunk))
-
-ec  = EthClient()
-print('Connected!')
-
-def press_key(key):
-  url_get(f'{key_host}/press/{key}')
-
-# Meanwhile we (etherclient) doesn't support this
-def release_key(key):
-  url_get(f'{key_host}/release/{key}')
+      data = fh.read()
+    print(f'Sending {data=}')
+    self.send_string(data)
+    
 
 # Reference: https://stackoverflow.com/questions/18160315/write-custom-widget-with-gtk3
 class MyWidget(Gtk.Misc):
   __gtype_name__ = 'MyWidget'
 
-  def __init__(self, *args, **kwds):
+  def __init__(self, no_grab = False, *args, **kwds):
     super().__init__(*args, **kwds)
     self.set_size_request(300, 300)
 
@@ -121,6 +125,7 @@ class MyWidget(Gtk.Misc):
     self.mouse_scale_x = 0.5
     self.mouse_scale_y = 0.5
     self.right_control = False  # Used for special
+    self.no_grab = no_grab
 
     # Needed for keypress events
     self.set_can_focus(True)
@@ -275,12 +280,13 @@ class MyWidget(Gtk.Misc):
 
     if self.right_control:
       if event.hardware_keycode in (118, # insert
+                                    119, # delete
                                     111, # Up
                                     113, # Left
                                     114, # right
                                     116, # down
                                     ):  
-        if event.hardware_keycode == 118:
+        if event.hardware_keycode in (118,119):
           print('Control Alt Delete')
           ec.send('^!{Delete}')
         elif event.hardware_keycode == 113:
@@ -353,6 +359,8 @@ class MyWidget(Gtk.Misc):
       self.modifiers.remove(event.hardware_keycode)
 
   def toggle_grab(self):
+    if self.no_grab:
+      return
     self.is_grabbed = not self.is_grabbed
 
     if self.is_grabbed:
@@ -372,10 +380,10 @@ class MyWidget(Gtk.Misc):
       self.seat.ungrab()
 
 class MyWindow(Gtk.Window):
-  def __init__(self):
+  def __init__(self, no_grab = False):
     super().__init__(title='EtherKeyClient')
 
-    self.wdg = MyWidget()
+    self.wdg = MyWidget(no_grab = no_grab)
     self.add(self.wdg)
     self.connect('map-event', self.on_map_event)
 
@@ -383,6 +391,79 @@ class MyWindow(Gtk.Window):
     print('on_map_event')
     self.wdg.toggle_grab()
 
+class SocketListener:
+  def __init__(self, port=8333, eth_client=None):
+    self.port = port
+    self.ec = eth_client
+
+  def start_socket_listener(self):
+    HOST = "127.0.0.1"  # Standard loopback interface address (localhost)
+    
+    self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    self.server_socket.bind((HOST, self.port))
+    self.server_socket.listen()
+  
+    GLib.io_add_watch(self.server_socket.fileno(),
+                      GLib.IO_IN,
+                      self.handle_connection)
+    return True
+
+
+  def handle_connection(self, fd, flags):
+    print('Handle connection')
+    conn, addr = self.server_socket.accept()
+    with conn:
+      print(f"Connected by {addr}")
+      while True:
+        data = conn.recv(1024)
+        if not data:
+            break
+
+        resp = ('HTTP/1.1 200 OK\n'
+                'Content-Type: application/json\n'
+                '\n'
+                '{ "res" : "ok" }')
+
+        print(f'Got {data}')
+        conn.sendall(resp.encode())
+        break
+
+    # Assume we got all the data
+    try:
+      path, payload = self.decode_request(data)
+    except RuntimeError as exc:
+      return
+
+    root = json.loads(payload)
+
+    # We support sending either strings or "raw" codes
+    action = root.get('action')
+    if action == 'string':
+      # How do i encode? the keys??
+      self.ec.send_string(root.get('string'))
+    elif action == 'code':
+      self.ec.send_code(root.get('code'))
+    elif action == 'file':
+      self.ec.upload_file(root.get('filename'))
+
+    conn.close()
+    return True
+        
+
+  def decode_request(self, data):
+    '''A simple http request decoder. Returns path and payload'''
+    m = re.search(r'POST (\S+)\s.(?:\S+)\r\n'
+                  r'.*'
+                  r'\r\n\r\n(.*)'
+                  ,
+                  data.decode(),
+                  re.DOTALL|re.MULTILINE
+                  )
+    if m:
+      return m.group(1), m.group(2)
+    raise RuntimeError('Failed matching patch!')
+  
+  
 parser = argparse.ArgumentParser(description='Process a file')
 parser.add_argument('-u', '--upload',
                     dest='upload',
@@ -390,16 +471,40 @@ parser.add_argument('-u', '--upload',
                     type=str,
                     default=None,
                     help='Output filename')
+parser.add_argument('-d', '--device',
+                    dest='device',
+                    action='store',
+                    type=str,
+                    default='/dev/ttyUSB0',
+                    help='Output filename')
+parser.add_argument('-p', '--port',
+                    dest='port',
+                    action='store',
+                    type=int,
+                    default=8333,
+                    help='listener port')
+parser.add_argument('--no-grab',
+                    dest='no_grab',
+                    action='store_true',
+                    help='Whether to grab')
 args = parser.parse_args()
+
+ec = EthClient(device=args.device)
+print('Connected!')
+
+sl = SocketListener(port=args.port,
+                    eth_client = ec)
+sl.start_socket_listener()
 
 
 if args.upload is not None:
-  ec = EthClient()
   ec.upload_file(args.upload)
   exit()
 
+
+
 # Interactive by default
-win = MyWindow()
+win = MyWindow(no_grab = args.no_grab)
 win.connect('destroy', Gtk.main_quit)
 win.show_all()
 Gtk.main()
