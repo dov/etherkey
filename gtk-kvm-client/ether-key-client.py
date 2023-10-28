@@ -18,12 +18,17 @@ import socket
 import urllib3
 import re
 import json
+import random
 
 gi.require_version('PangoCairo', '1.0')
 gi.require_version('Gtk', '3.0')
 from gi.repository import GLib, Gtk, Gdk, PangoCairo, Pango
 
 debug = False
+
+# mouse wiggle default parameters
+wiggle_timeout = 5  # five seconds
+wiggle_strength = 5 # five units of maximum movements
 
 def _ctrl(ch):
   '''Control function'''
@@ -106,7 +111,12 @@ class MyWidget(Gtk.Misc):
 
   def __init__(self, no_grab = False, *args, **kwds):
     super().__init__(*args, **kwds)
+
+    # Wiggle interaction
+    self.reset_wiggle()
+
     self.set_size_request(300, 300)
+    self.clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
 
     # Need this to get the mouse events!!
     self.set_events(Gdk.EventMask.ALL_EVENTS_MASK
@@ -122,8 +132,8 @@ class MyWidget(Gtk.Misc):
     self.is_grabbed = False
     self.mouse_x = None
     self.mouse_y = None
-    self.mouse_scale_x = 0.5
-    self.mouse_scale_y = 0.5
+    self.mouse_scale_x = 1
+    self.mouse_scale_y = 1
     self.right_control = False  # Used for special
     self.no_grab = no_grab
 
@@ -174,7 +184,10 @@ class MyWidget(Gtk.Misc):
       95 : ('{F11}', 'F11'),
       96 : ('{F12}', 'F12'),
       }
-      
+
+    # mouse mapping
+    self.mouse_buttons = { 1:0, 2:2, 3:1}
+
     # Active modifiers
     self.modifiers = set()
     display = Gdk.Display.get_default()
@@ -225,6 +238,8 @@ class MyWidget(Gtk.Misc):
           for k in self.modifiers))  # Set for unique
 
   def on_motion_notify(self, window, event):
+    self.reset_wiggle()
+
     if self.mouse_x is None:
       self.mouse_x = event.x
     if self.mouse_y is None:
@@ -259,19 +274,29 @@ class MyWidget(Gtk.Misc):
 
 
   def on_scroll(self, window, event):
+    self.reset_wiggle()
+
     # gtk and arduino hid has different ideas of scroll direction
     # therefore the minus
     cmd = f'{-event.delta_y:.0f}'
     ec.mouse_wheel(cmd)
 
   def on_button_press(self, window, event):
-    ec.mouse_button_press(f' {event.button-1}')
+    self.reset_wiggle()
+
+    mouse_button = self.mouse_buttons[event.button]
+    ec.mouse_button_press(f' {mouse_button}')
 
   def on_button_release(self, window, event):
-    ec.mouse_button_release(f' {event.button-1}')
+    self.reset_wiggle()
+
+    mouse_button = self.mouse_buttons[event.button]
+    ec.mouse_button_release(f' {mouse_button}')
     pass
 
   def do_key_press_event(self, event):
+    self.reset_wiggle()
+
     # Catch right control
     if event.hardware_keycode == 105:
       self.right_control_handled = False
@@ -313,8 +338,9 @@ class MyWidget(Gtk.Misc):
     # Look for control f
     if not self.is_grabbed:
       # Control f including on swapped keyboards
-      if (any(k in self.modifiers for k in (37,66))
-          and chr(event.keyval) == 'f'):
+      is_control = any(self.modifiers for k in (37,66))
+      is_shift = any(self.modifiers for k in (50,62))
+      if is_control and chr(event.keyval) == 'f':
         dialog = Gtk.FileChooserDialog(title='Select a file',
                                        parent=self.get_toplevel(),
                                        action = Gtk.FileChooserAction.OPEN)
@@ -328,6 +354,15 @@ class MyWidget(Gtk.Misc):
           ec.upload_file(fn)
         dialog.destroy()
         print('Got control-f!')
+        return
+
+      # C-v or S-Insert pastes the clipboard
+      if ((is_control and chr(event.keyval) == 'v')
+          # shift insert
+          or (is_shift and event.hardware_keycode == 118)
+          ):
+        text = self.clipboard.wait_for_text()
+        ec.send_string(text)
         return
 
     if event.hardware_keycode in self.special_keys:
@@ -346,6 +381,8 @@ class MyWidget(Gtk.Misc):
     ec.send(cmd)
 
   def do_key_release_event(self, event):
+    self.reset_wiggle()
+
     # Catch right control
     if event.hardware_keycode == 105:
       self.right_control = False
@@ -359,6 +396,8 @@ class MyWidget(Gtk.Misc):
       self.modifiers.remove(event.hardware_keycode)
 
   def toggle_grab(self):
+    self.reset_wiggle()
+
     if self.no_grab:
       return
     self.is_grabbed = not self.is_grabbed
@@ -379,6 +418,22 @@ class MyWidget(Gtk.Misc):
       print('ungrabbing')
       self.seat.ungrab()
 
+  def reset_wiggle(self):
+    self.last_interaction = time.time()
+
+  def wiggle_mouse_maybe(self):
+    now = time.time()
+    if now - self.last_interaction > wiggle_timeout:
+      # Random, but don't allow a 0,0 motion
+      while True:
+        dx,dy = [int(wiggle_strength*2*(random.random()-0.5))
+                 for i in range(2)]
+        if abs(dx)+abs(dy)!= 0:
+          break
+
+      ec.mouse_move(f'{dx} {dy}')
+      self.reset_wiggle()
+
 class MyWindow(Gtk.Window):
   def __init__(self, no_grab = False):
     super().__init__(title='EtherKeyClient')
@@ -390,6 +445,9 @@ class MyWindow(Gtk.Window):
   def on_map_event(self, window, event):
     print('on_map_event')
     self.wdg.toggle_grab()
+
+  def wiggle_mouse_maybe(self):
+    self.wdg.wiggle_mouse_maybe()
 
 class SocketListener:
   def __init__(self, port=8333, eth_client=None):
@@ -462,6 +520,13 @@ class SocketListener:
     if m:
       return m.group(1), m.group(2)
     raise RuntimeError('Failed matching patch!')
+
+def timeout_function():
+  # Here put all periodic activities. Currently we support
+  # mouse wiggling.
+  if args.mouse_alive:
+    win.wiggle_mouse_maybe()
+  return 1
   
   
 parser = argparse.ArgumentParser(description='Process a file')
@@ -487,6 +552,10 @@ parser.add_argument('--no-grab',
                     dest='no_grab',
                     action='store_true',
                     help='Whether to grab')
+parser.add_argument('--mouse-alive',
+                    dest='mouse_alive',
+                    action='store_true',
+                    help='Whether to keep alive by moving the mouse')
 args = parser.parse_args()
 
 ec = EthClient(device=args.device)
@@ -507,5 +576,6 @@ if args.upload is not None:
 win = MyWindow(no_grab = args.no_grab)
 win.connect('destroy', Gtk.main_quit)
 win.show_all()
+GLib.timeout_add(500, timeout_function)
 Gtk.main()
 
